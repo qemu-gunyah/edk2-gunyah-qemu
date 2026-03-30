@@ -50,4 +50,4 @@
   gFdtHobGuid
 
 [Depex]
-  gEdkiiPlatformHasAcpiGuid
+  TRUE

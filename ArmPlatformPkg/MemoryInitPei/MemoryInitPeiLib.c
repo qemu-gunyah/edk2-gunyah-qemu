@@ -10,7 +10,10 @@
 
 #include <Library/ArmMmuLib.h>
 #include <Library/ArmPlatformLib.h>
+#include <Library/BaseLib.h>
+#include <Library/BaseMemoryLib.h>
 #include <Library/DebugLib.h>
+#include <Library/FdtLib.h>
 #include <Library/HobLib.h>
 #include <Library/MemoryAllocationLib.h>
 #include <Library/PcdLib.h>
@@ -113,13 +116,86 @@ MemoryPeim (
   }
 
   if (!Found) {
-    // Reserved the memory space occupied by the firmware volume
-    BuildResourceDescriptorHob (
-      EFI_RESOURCE_SYSTEM_MEMORY,
-      ResourceAttributes,
-      SystemMemoryBase,
-      PcdGet64 (PcdSystemMemorySize)
-      );
+    //
+    // Gunyah: extend resource HOB to cover the SHARE'd (swiotlb) region.
+    // PcdSystemMemorySize was reduced by FdtParser to keep the UEFI region
+    // in LEND'd (executable) memory, but the Linux kernel needs the full
+    // range in the EFI memory map for linear map page table creation.
+    // Without this, swiotlb_init crashes with a level-2 translation fault.
+    //
+    // Parse DTB to discover the actual swiotlb size (set by QEMU's
+    // arm-confidential-guest swiotlb-size property). Fall back to 128MB
+    // only if the DTB node is missing.
+    //
+    {
+      UINT64 SwiotlbSize = 0;
+      UINT64 SwiotlbBase;
+
+      //
+      // Discover swiotlb size from DTB restricted-dma-pool node.
+      //
+      {
+        VOID        *Dtb;
+        INT32        DtbNode;
+        INT32        DtbPrev;
+        CONST CHAR8 *Compat;
+        INT32        CompatLen;
+
+        Dtb = (VOID *)(UINTN)PcdGet64 (PcdDeviceTreeInitialBaseAddress);
+        if ((Dtb != NULL) && (FdtCheckHeader (Dtb) == 0)) {
+          for (DtbPrev = 0; ; DtbPrev = DtbNode) {
+            DtbNode = FdtNextNode (Dtb, DtbPrev, NULL);
+            if (DtbNode < 0) {
+              break;
+            }
+
+            Compat = FdtGetProp (Dtb, DtbNode, "compatible", &CompatLen);
+            if ((Compat != NULL) &&
+                (AsciiStrCmp (Compat, "restricted-dma-pool") == 0))
+            {
+              CONST UINT64  *DmaReg;
+              INT32          DmaRegLen;
+
+              DmaReg = FdtGetProp (Dtb, DtbNode, "reg", &DmaRegLen);
+              if ((DmaReg != NULL) &&
+                  (DmaRegLen >= (INT32)(2 * sizeof (UINT64))))
+              {
+                SwiotlbSize = Fdt64ToCpu (ReadUnaligned64 (DmaReg + 1));
+              }
+
+              break;
+            }
+          }
+        }
+      }
+
+      if (SwiotlbSize == 0) {
+        SwiotlbSize = SIZE_128MB;
+        DEBUG ((DEBUG_WARN,
+          "Gunyah: restricted-dma-pool not found in DTB, using default 128MB\n"));
+      } else {
+        DEBUG ((DEBUG_INFO,
+          "Gunyah: swiotlb size from DTB = 0x%lx\n", SwiotlbSize));
+      }
+
+      SwiotlbBase = SystemMemoryBase + PcdGet64 (PcdSystemMemorySize);
+
+      BuildResourceDescriptorHob (
+        EFI_RESOURCE_SYSTEM_MEMORY,
+        ResourceAttributes,
+        SystemMemoryBase,
+        PcdGet64 (PcdSystemMemorySize) + SwiotlbSize
+        );
+
+      // Mark as EfiBootServicesData so the DXE core won't allocate code
+      // from the SHARE'd region (non-executable under Gunyah).
+      // The kernel maps EfiBootServicesData in its linear map.
+      BuildMemoryAllocationHob (
+        SwiotlbBase,
+        SwiotlbSize,
+        EfiBootServicesData
+        );
+    }
   }
 
   //

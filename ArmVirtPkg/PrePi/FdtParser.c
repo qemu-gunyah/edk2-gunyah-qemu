@@ -5,8 +5,29 @@
  */
 
 #include <Uefi.h>
+#include <Library/BaseLib.h>
 #include <Library/BaseMemoryLib.h>
 #include <Library/FdtLib.h>
+
+/*
+ * Gunyah: store the restricted-dma-pool (SHARE'd) region info.
+ * Initialized to 1 (not 0) so they land in .data, NOT .bss.
+ * BSS is cleared between FindMemnode (assembly) and C runtime,
+ * which would zero these if they were in BSS.
+ * The sentinel value 1 is overwritten by FindMemnode on success,
+ * and checked as "!= 1" won't cause issues (PoolSize is always
+ * page-aligned, never 1).
+ */
+/*
+ * Non-zero init forces placement in .data (not .bss).
+ * BSS is cleared between FindMemnode() (assembly) and C runtime,
+ * which would zero BSS globals. These are set by FindMemnode()
+ * when a restricted-dma-pool is found, then read by MemoryPeim
+ * and QemuVirtMemInfoLib during C runtime.
+ * MARKER value 0xDEAD means "not yet set by FindMemnode".
+ */
+UINT64  gGunyahSwiotlbBase = 0xDEAD;
+UINT64  gGunyahSwiotlbSize = 0xDEAD;
 
 BOOLEAN
 FindMemnode (
@@ -70,6 +91,61 @@ FindMemnode (
   *SystemMemorySize = Fdt32ToCpu (Prop[0]);
   if (SizeCells > 1) {
     *SystemMemorySize = (*SystemMemorySize << 32) | Fdt32ToCpu (Prop[1]);
+  }
+
+  //
+  // Gunyah: check for restricted-dma-pool in /reserved-memory.
+  // The SHARE'd region (swiotlb bounce buffer) is at the top of RAM
+  // and must be excluded from the UEFI memory map — it's managed by
+  // GunyahIoMmuDxe, not by the DXE core allocator.
+  //
+  {
+    INT32        ResvNode;
+    INT32        Child;
+    CONST CHAR8  *Compat;
+    INT32        CompatLen;
+
+    ResvNode = FdtPathOffset (DeviceTreeBlob, "/reserved-memory");
+    if (ResvNode >= 0) {
+      FdtForEachSubnode (Child, DeviceTreeBlob, ResvNode) {
+        Compat = FdtGetProp (DeviceTreeBlob, Child, "compatible", &CompatLen);
+        if ((Compat != NULL) &&
+            (AsciiStrCmp (Compat, "restricted-dma-pool") == 0))
+        {
+          CONST INT32 *ResvReg;
+          INT32       ResvLen;
+          UINT64      PoolSize;
+
+          ResvReg = FdtGetProp (DeviceTreeBlob, Child, "reg", &ResvLen);
+          if ((ResvReg != NULL) && (ResvLen >= (AddressCells + SizeCells) * (INT32)sizeof (INT32))) {
+            UINT64 PoolBase;
+            //
+            // Read pool base address
+            //
+            PoolBase = Fdt32ToCpu (ResvReg[0]);
+            if (AddressCells > 1) {
+              PoolBase = (PoolBase << 32) | Fdt32ToCpu (ResvReg[1]);
+            }
+
+            //
+            // Read pool size (skip base address cells)
+            //
+            PoolSize = Fdt32ToCpu (ResvReg[AddressCells]);
+            if (SizeCells > 1) {
+              PoolSize = (PoolSize << 32) | Fdt32ToCpu (ResvReg[AddressCells + 1]);
+            }
+
+            if (PoolSize > 0 && PoolSize < *SystemMemorySize) {
+              *SystemMemorySize -= PoolSize;
+              gGunyahSwiotlbBase = PoolBase;
+              gGunyahSwiotlbSize = PoolSize;
+            }
+          }
+
+          break;
+        }
+      }
+    }
   }
 
   return TRUE;

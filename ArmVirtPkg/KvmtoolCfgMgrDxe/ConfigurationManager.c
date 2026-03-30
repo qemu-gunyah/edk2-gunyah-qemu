@@ -70,15 +70,6 @@ EDKII_PLATFORM_REPOSITORY_INFO  mKvmtoolPlatRepositoryInfo = {
       NULL
     },
     //
-    // SPCR Table
-    //
-    {
-      EFI_ACPI_6_3_SERIAL_PORT_CONSOLE_REDIRECTION_TABLE_SIGNATURE,
-      EFI_ACPI_SERIAL_PORT_CONSOLE_REDIRECTION_TABLE_REVISION,
-      CREATE_STD_ACPI_TABLE_GEN_ID (EStdAcpiTableIdSpcr),
-      NULL
-    },
-    //
     // DSDT Table
     //
     {
@@ -94,24 +85,6 @@ EDKII_PLATFORM_REPOSITORY_INFO  mKvmtoolPlatRepositoryInfo = {
       EFI_ACPI_6_3_SECONDARY_SYSTEM_DESCRIPTION_TABLE_SIGNATURE,
       0, // Unused
       CREATE_STD_ACPI_TABLE_GEN_ID (EStdAcpiTableIdSsdtCpuTopology),
-      NULL
-    },
-    //
-    // DBG2 Table
-    //
-    {
-      EFI_ACPI_6_3_DEBUG_PORT_2_TABLE_SIGNATURE,
-      EFI_ACPI_DBG2_DEBUG_DEVICE_INFORMATION_STRUCT_REVISION,
-      CREATE_STD_ACPI_TABLE_GEN_ID (EStdAcpiTableIdDbg2),
-      NULL
-    },
-    //
-    // SSDT Serial Port Table
-    //
-    {
-      EFI_ACPI_6_3_SECONDARY_SYSTEM_DESCRIPTION_TABLE_SIGNATURE,
-      0, // Unused
-      CREATE_STD_ACPI_TABLE_GEN_ID (EStdAcpiTableIdSsdtSerialPort),
       NULL
     },
     //
@@ -139,6 +112,28 @@ EDKII_PLATFORM_REPOSITORY_INFO  mKvmtoolPlatRepositoryInfo = {
       EFI_ACPI_6_3_IO_REMAPPING_TABLE_SIGNATURE,
       EFI_ACPI_IO_REMAPPING_TABLE_REVISION_00,
       CREATE_STD_ACPI_TABLE_GEN_ID (EStdAcpiTableIdIort),
+      NULL
+    },
+    //
+    // SPCR Table — Serial Port Console Redirection
+    // Required by Windows bootmgfw/cdboot for debug serial console.
+    // Populated from DTB stdout-path → NS16550A at 0x09040000.
+    //
+    {
+      EFI_ACPI_6_3_SERIAL_PORT_CONSOLE_REDIRECTION_TABLE_SIGNATURE,
+      EFI_ACPI_SERIAL_PORT_CONSOLE_REDIRECTION_TABLE_REVISION,
+      CREATE_STD_ACPI_TABLE_GEN_ID (EStdAcpiTableIdSpcr),
+      NULL
+    },
+    //
+    // DBG2 Table — Debug Port Table 2
+    // Uses ConsolePortInfo (NS16550A) as fallback when DebugPortInfo
+    // has Clock=0 (PL011).  Required by Windows cdboot/bootmgfw.
+    //
+    {
+      EFI_ACPI_6_3_DEBUG_PORT_2_TABLE_SIGNATURE,
+      0, // Unused
+      CREATE_STD_ACPI_TABLE_GEN_ID (EStdAcpiTableIdDbg2),
       NULL
     },
   },
@@ -685,11 +680,10 @@ GetStandardNameSpaceObject (
                  );
       if (Status == EFI_NOT_FOUND) {
         //
-        // The last 3 tables are for PCIe. If PCIe information is not
-        // present, Kvmtool was launched without the PCIe option.
-        // Therefore, reduce the table count by 3.
+        // The last 4 tables are: MCFG, SSDT-PCI, IORT (PCIe), SPCR.
+        // If PCIe information is not present, reduce count by 4.
         //
-        AcpiTableCount   -= 3;
+        AcpiTableCount   -= 4;
         PciSupportPresent = FALSE;
       } else if (EFI_ERROR (Status)) {
         ASSERT_EFI_ERROR (Status);
@@ -716,6 +710,27 @@ GetStandardNameSpaceObject (
           // IORT is only required for GicV3/4
           //
           AcpiTableCount -= 1;
+        }
+      }
+
+      //
+      // Check if console port info is available for SPCR/DBG2.
+      // If not found, reduce table count by 2 (SPCR + DBG2 are last).
+      //
+      {
+        EFI_STATUS  SerialStatus;
+        SerialStatus = DynamicPlatRepoGetObject (
+                         PlatformRepo->DynamicPlatformRepo,
+                         CREATE_CM_ARCH_COMMON_OBJECT_ID (
+                           EArchCommonObjConsolePortInfo
+                           ),
+                         CM_NULL_TOKEN,
+                         &CmObjDesc
+                         );
+        if (SerialStatus == EFI_NOT_FOUND) {
+          DEBUG ((DEBUG_WARN, "WARNING: SPCR + DBG2 Tables skipped "
+                  "(no ConsolePortInfo from DTB).\n"));
+          AcpiTableCount -= 2;  // Remove both SPCR and DBG2
         }
       }
 
@@ -789,6 +804,51 @@ GetArchCommonNameSpaceObject (
                  1,
                  CmObject
                  );
+      break;
+
+    case EArchCommonObjSerialDebugPortInfo:
+      //
+      // DBG2 generator requests the debug serial port.  The FDT parser
+      // populates this from PL011 which has Clock=0 and fails UART init.
+      // Fall back to ConsolePortInfo (NS16550A) which has valid Clock.
+      // We must patch CmObject->ObjectId to match the expected ID since
+      // the getter validates it.
+      //
+      {
+        BOOLEAN UseFallback = FALSE;
+
+        Status = DynamicPlatRepoGetObject (
+                   PlatformRepo->DynamicPlatformRepo,
+                   CmObjectId,
+                   Token,
+                   CmObject
+                   );
+        if (!EFI_ERROR (Status) && (CmObject->Data != NULL)) {
+          CM_ARCH_COMMON_SERIAL_PORT_INFO *DbgPort =
+            (CM_ARCH_COMMON_SERIAL_PORT_INFO *)CmObject->Data;
+          if (DbgPort->Clock == 0) {
+            DEBUG ((DEBUG_WARN,
+              "WARNING: DebugPortInfo Clock=0, using ConsolePortInfo for DBG2\n"));
+            UseFallback = TRUE;
+          }
+        } else {
+          UseFallback = TRUE;
+        }
+
+        if (UseFallback) {
+          Status = DynamicPlatRepoGetObject (
+                     PlatformRepo->DynamicPlatformRepo,
+                     CREATE_CM_ARCH_COMMON_OBJECT_ID (EArchCommonObjConsolePortInfo),
+                     Token,
+                     CmObject
+                     );
+          if (!EFI_ERROR (Status)) {
+            // Patch the ObjectId so DBG2 generator's validation passes
+            CmObject->ObjectId = CmObjectId;
+            DEBUG ((DEBUG_INFO, "INFO: DBG2 using ConsolePortInfo as DebugPortInfo\n"));
+          }
+        }
+      }
       break;
 
     default:

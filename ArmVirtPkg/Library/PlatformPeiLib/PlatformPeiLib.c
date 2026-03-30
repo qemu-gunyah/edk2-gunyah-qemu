@@ -224,5 +224,21 @@ PlatformPeim (
 
   BuildFvHob (PcdGet64 (PcdFvBaseAddress), PcdGet32 (PcdFvSize));
 
+  //
+  // Add Resource HOB for PCI MMIO region so it appears in the GCD memory map
+  // before any driver tries ConvertPages on it. Without this, ConvertPages
+  // fails for PCI BAR addresses which causes Windows bootloader to hang.
+  //
+  // PCI MMIO window: 0x10000000 - 0x3efeffff (QEMU virt standard layout)
+  //
+  BuildResourceDescriptorHob (
+    EFI_RESOURCE_MEMORY_MAPPED_IO,
+    EFI_RESOURCE_ATTRIBUTE_PRESENT     |
+      EFI_RESOURCE_ATTRIBUTE_INITIALIZED |
+      EFI_RESOURCE_ATTRIBUTE_UNCACHEABLE,
+    0x10000000,
+    0x2eff0000
+    );
+
   return EFI_SUCCESS;
 }

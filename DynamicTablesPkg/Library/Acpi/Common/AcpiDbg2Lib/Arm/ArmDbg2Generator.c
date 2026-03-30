@@ -55,13 +55,15 @@ Dbg2InitializePort (
   IN OUT EFI_STOP_BITS_TYPE                  *StopBits
   )
 {
-  return PL011UartInitializePort (
-           (UINTN)SerialPortInfo->BaseAddress,
-           SerialPortInfo->Clock,
-           BaudRate,
-           ReceiveFifoDepth,
-           Parity,
-           DataBits,
-           StopBits
-           );
+  //
+  // Skip PL011 re-initialization.  The UART is already configured and
+  // working by the time the DBG2 generator runs.  Re-initializing it
+  // under Gunyah's trap-and-emulate causes a hang in the TXFE polling
+  // loop (PL011UartInitializePort waits for TX FIFO empty, which may
+  // not be reported correctly through MMIO exits).
+  //
+  // The DBG2 table just needs to describe the port — it does not need
+  // to re-configure the hardware.
+  //
+  return RETURN_SUCCESS;
 }

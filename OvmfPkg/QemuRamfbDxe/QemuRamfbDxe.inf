@@ -38,6 +38,7 @@
 
 [Protocols]
   gEfiGraphicsOutputProtocolGuid                ## PRODUCES
+  gEdkiiIoMmuProtocolGuid                       ## SOMETIMES_CONSUMES
 
 [Guids]
   gQemuRamfbGuid

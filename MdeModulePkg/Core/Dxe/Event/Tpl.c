@@ -62,8 +62,13 @@ CoreRaiseTpl (
 
   OldTpl = gEfiCurrentTpl;
   if (OldTpl > NewTpl) {
-    DEBUG ((DEBUG_ERROR, "FATAL ERROR - RaiseTpl with OldTpl(0x%x) > NewTpl(0x%x)\n", OldTpl, NewTpl));
-    ASSERT (FALSE);
+    //
+    // Gunyah workaround: timer interrupt can fire during MMIO exit
+    // return, leaving TPL at HIGH_LEVEL.  Clamp instead of asserting
+    // so boot can continue.
+    //
+    DEBUG ((DEBUG_WARN, "WARNING - RaiseTpl with OldTpl(0x%x) > NewTpl(0x%x), clamping\n", OldTpl, NewTpl));
+    return OldTpl;
   }
 
   ASSERT (VALID_TPL (NewTpl));

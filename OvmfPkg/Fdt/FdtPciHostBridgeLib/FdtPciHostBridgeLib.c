@@ -102,6 +102,7 @@ ProcessPciHost (
   UINT32               Len;
   UINT32               RecordIdx;
   EFI_STATUS           Status;
+  EFI_STATUS           Status2;
   UINT64               IoTranslation;
   UINT64               Mmio32Translation;
   UINT64               Mmio64Translation;
@@ -336,6 +337,33 @@ ProcessPciHost (
     //
     Status = MapGcdMmioSpace (*IoBase + IoTranslation, *IoSize);
     ASSERT_EFI_ERROR (Status);
+  }
+
+  //
+  // Map the PCI MMIO32 aperture in the GCD memory map so that
+  // ConvertPages/AllocatePages can find it. Without this, Windows
+  // bootmgfw.efi fails with "ConvertPages: failed to find range" when
+  // it tries to set up PCI BAR mappings.
+  //
+  // These calls may fail with EFI_ALREADY_STARTED if the region is already
+  // covered by an existing GCD entry (e.g. QemuVirtMemInfoLib's catch-all
+  // 0x0-0x80000000 DEVICE mapping). That is fine — the region is already
+  // mapped. Do not propagate the error or PCI enumeration will be killed.
+  //
+  if (*Mmio32Size != 0) {
+    Status2 = MapGcdMmioSpace (*Mmio32Base, *Mmio32Size);
+    if (EFI_ERROR (Status2)) {
+      DEBUG ((DEBUG_WARN, "%a: MMIO32 [0x%Lx+0x%Lx) GCD map: %r (may be pre-mapped)\n",
+        __func__, *Mmio32Base, *Mmio32Size, Status2));
+    }
+  }
+
+  if (*Mmio64Size != 0) {
+    Status2 = MapGcdMmioSpace (*Mmio64Base, *Mmio64Size);
+    if (EFI_ERROR (Status2)) {
+      DEBUG ((DEBUG_WARN, "%a: MMIO64 [0x%Lx+0x%Lx) GCD map: %r (may be pre-mapped)\n",
+        __func__, *Mmio64Base, *Mmio64Size, Status2));
+    }
   }
 
   return Status;

@@ -721,16 +721,36 @@ GicV3ExitBootServicesEvent (
   )
 {
   UINTN  Index;
+  UINTN  GicInterrupt;
 
-  // Acknowledge all pending interrupts in SPI range.
+  // Disable all interrupt sources (SPI range)
   for (Index = 0; Index <= mGicMaxSpiIntId; Index++) {
     GicV3DisableInterruptSource (&gHardwareInterruptV3Protocol, Index);
   }
 
-  // Acknowledge all pending interrupts in extended SPI range.
+  // Disable all interrupt sources (extended SPI range)
   for (Index = ARM_GIC_ARCH_EXT_SPI_MIN; Index <= mGicMaxExtSpiIntId; Index++) {
     GicV3DisableInterruptSource (&gHardwareInterruptV3Protocol, Index);
   }
+
+  //
+  // Drain all pending/active interrupts by reading ICC_IAR1_EL1 and
+  // writing ICC_EOIR1_EL1 until a spurious interrupt (1023) is returned.
+  // This ensures no interrupt is left in the "active" state in the GIC
+  // virtual interface, which would block future interrupts of the same
+  // or lower priority when the next OS re-initializes the GIC.
+  //
+  // Without this, a timer PPI left "active" at ExitBootServices can
+  // prevent the OS bootloader from receiving timer interrupts, causing
+  // an intermittent hang (the race depends on whether the timer fires
+  // between the last EndOfInterrupt and this cleanup).
+  //
+  do {
+    GicInterrupt = ArmGicV3AcknowledgeInterrupt ();
+    if (GicInterrupt < 1020) {
+      GicV3EndOfInterrupt (&gHardwareInterruptV3Protocol, GicInterrupt);
+    }
+  } while (GicInterrupt < 1020);
 
   // Disable Gic Interface
   ArmGicV3DisableInterruptInterface ();

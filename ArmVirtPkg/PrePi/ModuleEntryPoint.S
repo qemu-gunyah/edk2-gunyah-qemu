@@ -10,6 +10,24 @@
 
 ASM_FUNC(_ModuleEntryPoint)
   //
+  // Set VBAR_EL1 to a minimal exception vector table FIRST, before any
+  // code that could cause exceptions.  Under Gunyah, the default VBAR
+  // (0x0) points to MMIO trap space which causes a fatal page fault
+  // if any exception occurs during early init.
+  //
+  adr   x9, _EarlyExceptionVectors
+  msr   vbar_el1, x9
+  isb
+
+  //
+  // Diagnostic breadcrumbs: write letters to PL011 to trace execution
+  //
+  mov   x15, #0x09000000    // PL011 base (kept in x15 for reuse)
+
+  mov   w16, #'a'           // 'a' = VBAR set, starting DTB check
+  str   w16, [x15]
+
+  //
   // If we are booting from RAM using the Linux kernel boot protocol, x0 will
   // point to the DTB image in memory. Otherwise, use the default value defined
   // by the platform.
@@ -20,11 +38,79 @@ ASM_FUNC(_ModuleEntryPoint)
 0:mov   x28, x0             // preserve DTB pointer
   mov   x27, x1             // preserve base of image pointer
 
+  mov   w16, #'b'           // 'b' = before ArmEnableVFP
+  str   w16, [x15]
+  // Print x27 (image base) top 3 nibbles
+  mov   w16, #'='
+  str   w16, [x15]
+  mov   x17, x27
+  lsr   x17, x17, #28
+  and   w16, w17, #0xF
+  add   w16, w16, #'0'
+  cmp   w16, #('9'+1)
+  b.lt  10f
+  add   w16, w16, #('A'-'0'-10)
+10:str  w16, [x15]
+  mov   x17, x27
+  lsr   x17, x17, #24
+  and   w16, w17, #0xF
+  add   w16, w16, #'0'
+  cmp   w16, #('9'+1)
+  b.lt  11f
+  add   w16, w16, #('A'-'0'-10)
+11:str  w16, [x15]
+  mov   x17, x27
+  lsr   x17, x17, #20
+  and   w16, w17, #0xF
+  add   w16, w16, #'0'
+  cmp   w16, #('9'+1)
+  b.lt  12f
+  add   w16, w16, #('A'-'0'-10)
+12:str  w16, [x15]
+  mov   w16, #' '
+  str   w16, [x15]
+
   // Enable Floating Point. This needs to be done before entering C code, which
   // may use FP/SIMD registers.
   bl    ArmEnableVFP
 
+  // Print DTB pointer as hex nibbles to diagnose bad address
+  mov   w16, #'c'
+  str   w16, [x15]
+  mov   w16, #'='
+  str   w16, [x15]
+  // Print x28 (DTB pointer) as 8 hex digits (top 32 bits)
+  mov   x17, x28
+  lsr   x17, x17, #28
+  and   w16, w17, #0xF
+  add   w16, w16, #'0'
+  cmp   w16, #('9'+1)
+  b.lt  1f
+  add   w16, w16, #('A'-'0'-10)
+1:str   w16, [x15]
+  mov   x17, x28
+  lsr   x17, x17, #24
+  and   w16, w17, #0xF
+  add   w16, w16, #'0'
+  cmp   w16, #('9'+1)
+  b.lt  2f
+  add   w16, w16, #('A'-'0'-10)
+2:str   w16, [x15]
+  mov   x17, x28
+  lsr   x17, x17, #20
+  and   w16, w17, #0xF
+  add   w16, w16, #'0'
+  cmp   w16, #('9'+1)
+  b.lt  3f
+  add   w16, w16, #('A'-'0'-10)
+3:str   w16, [x15]
+  mov   w16, #' '
+  str   w16, [x15]
+
   bl    ASM_PFX(DiscoverDramFromDt)
+
+  mov   w16, #'d'           // 'd' = after DiscoverDramFromDt
+  str   w16, [x15]
 
   // Get ID of this CPU in Multicore system
   bl    ASM_PFX(ArmReadMpidr)
@@ -108,6 +194,64 @@ _GetStackBase:
 _NeverReturn:
   b _NeverReturn
 
+//
+// Minimal early exception vector table for PrePi.
+// Each vector is a simple deadloop — just enough to avoid faulting on
+// unmapped memory at address 0x0 (Gunyah MMIO trap space).
+// The real exception handlers are installed later by CpuDxe.
+//
+// ARM64 requires 2KB alignment for the vector table.
+// Each handler writes a unique character to PL011 UART (0x9000000)
+// before deadlooping, so we can identify which exception fired.
+//
+.macro EXCEPTION_ENTRY char
+  mov   x10, #0x09000000
+  mov   w11, #\char
+  str   w11, [x10]
+  mov   w11, #'\n'
+  str   w11, [x10]
+0:wfe
+  b     0b
+.endm
+
+.balign 2048
+_EarlyExceptionVectors:
+  // Current EL with SP0
+  EXCEPTION_ENTRY '0'    // 0x000: Synchronous
+  .balign 128
+  EXCEPTION_ENTRY '1'    // 0x080: IRQ
+  .balign 128
+  EXCEPTION_ENTRY '2'    // 0x100: FIQ
+  .balign 128
+  EXCEPTION_ENTRY '3'    // 0x180: SError
+  .balign 128
+  // Current EL with SPx
+  EXCEPTION_ENTRY '4'    // 0x200: Synchronous
+  .balign 128
+  EXCEPTION_ENTRY '5'    // 0x280: IRQ
+  .balign 128
+  EXCEPTION_ENTRY '6'    // 0x300: FIQ
+  .balign 128
+  EXCEPTION_ENTRY '7'    // 0x380: SError
+  .balign 128
+  // Lower EL using AArch64
+  EXCEPTION_ENTRY '8'    // 0x400: Synchronous
+  .balign 128
+  EXCEPTION_ENTRY '9'    // 0x480: IRQ
+  .balign 128
+  EXCEPTION_ENTRY 'A'    // 0x500: FIQ
+  .balign 128
+  EXCEPTION_ENTRY 'B'    // 0x580: SError
+  .balign 128
+  // Lower EL using AArch32
+  EXCEPTION_ENTRY 'C'    // 0x600: Synchronous
+  .balign 128
+  EXCEPTION_ENTRY 'D'    // 0x680: IRQ
+  .balign 128
+  EXCEPTION_ENTRY 'E'    // 0x700: FIQ
+  .balign 128
+  EXCEPTION_ENTRY 'F'    // 0x780: SError
+
 // VOID
 // DiscoverDramFromDt (
 //   VOID   *DeviceTreeBaseAddress,   // passed by loader in x0, preserved in x28
@@ -116,16 +260,29 @@ _NeverReturn:
 ASM_PFX(DiscoverDramFromDt):
   mov   x29, x30            // preserve LR
 
+  mov   w16, #'1'
+  str   w16, [x15]
+
   //
   // The base of the runtime image has been preserved in x27. Check whether
   // the expected magic number can be found in the header.
   //
   LDR_LIT_TMP(w8, .LArm64LinuxMagic, x8)
+
+  mov   w16, #'2'
+  str   w16, [x15]
+
   ldr   w9, [x27, #0x38]
+
+  mov   w16, #'3'
+  str   w16, [x15]
+
   cmp   w8, w9
   bne   .Lout
 
-  //
+  mov   w16, #'4'           // not exception '4', this is breadcrumb '4'
+  str   w16, [x15]
+
   //
   // OK, so far so good. We have confirmed that we likely have a DTB and are
   // booting via the arm64 Linux boot protocol. Update the base-of-image PCD
@@ -134,6 +291,10 @@ ASM_PFX(DiscoverDramFromDt):
   //
   adr   x8, PcdGet64 (PcdFdBaseAddress)
   adr   x9, PcdGet64 (PcdFvBaseAddress)
+
+  mov   w16, #'5'
+  str   w16, [x15]
+
   ldr   x6, [x8]
   ldr   x7, [x9]
   sub   x7, x7, x6
@@ -141,14 +302,21 @@ ASM_PFX(DiscoverDramFromDt):
   str   x27, [x8]
   str   x7, [x9]
 
+  mov   w16, #'6'
+  str   w16, [x15]
+
   //
   // The runtime address may be different from the link time address so fix
-  // up the PE/COFF relocations. Since we are calling a C function, use the
-  // window at the beginning of the FD image as a temp stack.
+  // up the PE/COFF relocations. Since we are calling a C function, we need
+  // a temp stack.  The original code uses "the window at the beginning of
+  // the FD image" — but on Gunyah the FD base == RAM base (0x80000000),
+  // so the stack would grow into unmapped MMIO trap space below.
+  // Instead, use a 4 KB temp stack just past the FD image end.
   //
   mov   x0, x7
   adr   x1, PeCoffLoaderImageReadFromMemory
-  mov   sp, x7
+  add   x10, x27, #0x800000  // temp stack = FD base + 8 MB (well past DTB at +4MB)
+  mov   sp, x10
   bl    RelocatePeCoffImage
 
   //

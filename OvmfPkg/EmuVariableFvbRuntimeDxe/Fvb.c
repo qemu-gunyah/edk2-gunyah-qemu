@@ -783,11 +783,17 @@ FvbInitialize (
   //
   if (Initialize) {
     Template = (VOID *)(UINTN)PcdGet32 (PcdOvmfFlashNvStorageVariableBase);
-    Status   = ValidateFvHeader (Template);
+    if (Template != NULL) {
+      Status = ValidateFvHeader (Template);
+    } else {
+      Status = EFI_NOT_FOUND;
+    }
+
     if (!EFI_ERROR (Status)) {
       DEBUG ((DEBUG_INFO, "EMU Variable FVB: Initialized FV from ROM template.\n"));
       CopyMem (Ptr, Template, EMU_FVB_SIZE);
     } else {
+      DEBUG ((DEBUG_INFO, "EMU Variable FVB: No ROM template, initializing from scratch.\n"));
       SetMem (Ptr, EMU_FVB_SIZE, ERASED_UINT8);
       InitializeFvAndVariableStoreHeaders (Ptr);
     }

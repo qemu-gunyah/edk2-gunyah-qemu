@@ -58,7 +58,7 @@ QemuVirtMemInfoPeiLibConstructor (
       // two 8 byte quantities for base and size, respectively.
       //
       RegProp = FdtGetProp (DeviceTreeBase, Node, "reg", &Len);
-      if ((RegProp != 0) && (Len == (2 * sizeof (UINT64)))) {
+      if ((RegProp != 0) && (Len >= (2 * sizeof (UINT64)))) {
         CurBase = Fdt64ToCpu (ReadUnaligned64 (RegProp));
         CurSize = Fdt64ToCpu (ReadUnaligned64 (RegProp + 1));
 
@@ -89,6 +89,56 @@ QemuVirtMemInfoPeiLibConstructor (
   //
   ASSERT (FixedPcdGet64 (PcdSystemMemoryBase) == NewBase);
 
+  //
+  // Gunyah: subtract the SHARE'd (swiotlb/restricted-dma-pool) region
+  // from the reported memory size.  This GUID HOB is used by:
+  //   - MemoryPeim to create resource descriptor HOBs
+  //   - QemuVirtMemInfoLib to set up the EDK2 MMU virtual memory table
+  //
+  // The SHARE'd region must NOT be in EDK2's MMU mapping because it may
+  // not be accessible at stage-2 during early firmware boot (accessing it
+  // causes SIGBUS on the host).  However, it DOES need to appear in the
+  // EFI memory map so the Linux kernel creates page table entries for it.
+  // MemoryPeim handles this by creating a separate untested resource HOB.
+  //
+  {
+    UINT64       SwiotlbSize;
+    INT32        RsvNode;
+    INT32        RsvPrev;
+    CONST CHAR8  *Compat;
+    INT32        CompatLen;
+    CONST UINT64 *DmaReg;
+    INT32        DmaRegLen;
+
+    SwiotlbSize = 0;
+
+    for (RsvPrev = 0; ; RsvPrev = RsvNode) {
+      RsvNode = FdtNextNode (DeviceTreeBase, RsvPrev, NULL);
+      if (RsvNode < 0) {
+        break;
+      }
+
+      Compat = FdtGetProp (DeviceTreeBase, RsvNode, "compatible", &CompatLen);
+      if ((Compat != NULL) && (AsciiStrCmp (Compat, "restricted-dma-pool") == 0)) {
+        DmaReg = FdtGetProp (DeviceTreeBase, RsvNode, "reg", &DmaRegLen);
+        if ((DmaReg != NULL) && (DmaRegLen >= (INT32)(2 * sizeof (UINT64)))) {
+          SwiotlbSize = Fdt64ToCpu (ReadUnaligned64 (DmaReg + 1));
+        }
+
+        break;
+      }
+    }
+
+    if ((SwiotlbSize > 0) && (NewSize > SwiotlbSize)) {
+      DEBUG ((
+        DEBUG_INFO,
+        "%a: Gunyah: excluding 0x%lx SHARE'd from EDK2 allocator (0x%lx -> 0x%lx)\n",
+        __func__, SwiotlbSize, NewSize, NewSize - SwiotlbSize
+        ));
+      NewSize -= SwiotlbSize;
+    }
+  }
+
   Hob = BuildGuidDataHob (
           &gArmVirtSystemMemorySizeGuid,
           &NewSize,
@@ -98,18 +148,13 @@ QemuVirtMemInfoPeiLibConstructor (
 
   //
   // We need to make sure that the machine we are running on has at least
-  // 128 MB of memory configured, and is currently executing this binary from
-  // NOR flash. This prevents a device tree image in DRAM from getting
-  // clobbered when our caller installs permanent PEI RAM, before we have a
-  // chance of marking its location as reserved or copy it to a freshly
-  // allocated block in the permanent PEI RAM in the platform PEIM.
+  // 128 MB of memory configured.
+  //
+  // Note: The FD/DRAM non-overlap assertion is removed for Gunyah support.
+  // Under Gunyah, firmware runs from LEND'd RAM (PcdFdBaseAddress ==
+  // PcdSystemMemoryBase), so the FD intentionally overlaps system memory.
   //
   ASSERT (NewSize >= SIZE_128MB);
-  ASSERT (
-    (((UINT64)PcdGet64 (PcdFdBaseAddress) +
-      (UINT64)PcdGet32 (PcdFdSize)) <= NewBase) ||
-    ((UINT64)PcdGet64 (PcdFdBaseAddress) >= (NewBase + NewSize))
-    );
 
   return RETURN_SUCCESS;
 }

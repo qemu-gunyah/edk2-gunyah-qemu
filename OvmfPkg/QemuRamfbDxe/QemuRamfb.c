@@ -9,6 +9,7 @@
 **/
 
 #include <Protocol/GraphicsOutput.h>
+#include <Protocol/IoMmu.h>
 
 #include <Library/BaseLib.h>
 #include <Library/BaseMemoryLib.h>
@@ -20,6 +21,15 @@
 #include <Library/QemuFwCfgLib.h>
 
 #include <Guid/QemuRamfb.h>
+
+//
+// Gunyah: When EDKII_IOMMU_PROTOCOL is available, the framebuffer must be
+// allocated from SHARE'd memory so the host (QEMU) can read pixel data.
+// Regular AllocateReservedPages returns LEND'd memory which is host-
+// inaccessible after VM_START, resulting in a blank display.
+//
+STATIC EDKII_IOMMU_PROTOCOL  *mIoMmu;
+STATIC BOOLEAN                mFbFromIoMmu;
 
 #define RAMFB_FORMAT  0x34325258 /* DRM_FORMAT_XRGB8888 */
 #define RAMFB_BPP     4
@@ -297,7 +307,44 @@ InitializeQemuRamfb (
 
   Pages     = EFI_SIZE_TO_PAGES (MaxFbSize);
   MaxFbSize = EFI_PAGES_TO_SIZE (Pages);
-  FbBase    = (EFI_PHYSICAL_ADDRESS)(UINTN)AllocateReservedPages (Pages);
+
+  //
+  // Gunyah: Try to allocate framebuffer from SHARE'd memory via IoMmu.
+  // The host needs to read pixel data, which is impossible from LEND'd memory.
+  //
+  FbBase = 0;
+  Status = gBS->LocateProtocol (&gEdkiiIoMmuProtocolGuid, NULL, (VOID **)&mIoMmu);
+  if (!EFI_ERROR (Status) && mIoMmu != NULL) {
+    VOID  *FbPtr = NULL;
+    Status = mIoMmu->AllocateBuffer (
+                        mIoMmu,
+                        AllocateAnyPages,
+                        EfiReservedMemoryType,
+                        Pages,
+                        &FbPtr,
+                        0
+                        );
+    if (!EFI_ERROR (Status) && FbPtr != NULL) {
+      FbBase       = (EFI_PHYSICAL_ADDRESS)(UINTN)FbPtr;
+      mFbFromIoMmu = TRUE;
+      DEBUG ((
+        DEBUG_INFO,
+        "Ramfb: Framebuffer allocated from IoMmu SHARE'd pool at 0x%lx\n",
+        (UINT64)FbBase
+        ));
+    } else {
+      DEBUG ((
+        DEBUG_WARN,
+        "Ramfb: IoMmu AllocateBuffer failed (%r), falling back\n",
+        Status
+        ));
+    }
+  }
+
+  if (FbBase == 0) {
+    FbBase = (EFI_PHYSICAL_ADDRESS)(UINTN)AllocateReservedPages (Pages);
+  }
+
   if (FbBase == 0) {
     DEBUG ((DEBUG_ERROR, "Ramfb: memory allocation failed\n"));
     return EFI_OUT_OF_RESOURCES;
@@ -305,10 +352,11 @@ InitializeQemuRamfb (
 
   DEBUG ((
     DEBUG_INFO,
-    "Ramfb: Framebuffer at 0x%lx, %lu kB, %lu pages\n",
+    "Ramfb: Framebuffer at 0x%lx, %lu kB, %lu pages (shared=%d)\n",
     (UINT64)FbBase,
     (UINT64)(MaxFbSize / 1024),
-    (UINT64)Pages
+    (UINT64)Pages,
+    mFbFromIoMmu
     ));
   mQemuRamfbMode.FrameBufferSize = MaxFbSize;
   mQemuRamfbMode.FrameBufferBase = FbBase;
@@ -435,6 +483,11 @@ FreeRamfbHandle:
 FreeRamfbDevicePath:
   FreePool (RamfbDevicePath);
 FreeFramebuffer:
-  FreePages ((VOID *)(UINTN)mQemuRamfbMode.FrameBufferBase, Pages);
+  if (mFbFromIoMmu && mIoMmu != NULL) {
+    mIoMmu->FreeBuffer (mIoMmu, Pages, (VOID *)(UINTN)mQemuRamfbMode.FrameBufferBase);
+  } else {
+    FreePages ((VOID *)(UINTN)mQemuRamfbMode.FrameBufferBase, Pages);
+  }
+
   return Status;
 }

@@ -7,6 +7,7 @@
 #include <IndustryStandard/QemuUefiVars.h>
 
 #include <Library/BaseLib.h>
+#include <Library/BaseMemoryLib.h>
 #include <Library/DebugLib.h>
 #include <Library/DxeServicesTableLib.h>
 #include <Library/IoLib.h>
@@ -146,6 +147,7 @@ VirtMmHwPioTransfer (
   UINT32      Bytes = 0;
   UINT32      Crc1;
   UINT32      Crc2;
+  UINT32      LastVal = 0;
   EFI_STATUS  Status;
 
   Status = VirtMmHwCommand (UEFI_VARS_CMD_PIO_ZERO_OFFSET);
@@ -155,17 +157,45 @@ VirtMmHwPioTransfer (
   }
 
   while (Bytes < BufferSize) {
+    UINT32  Remaining = BufferSize - Bytes;
+
     if (ToDevice) {
-      MmioWrite32 (mUefiVarsAddr + UEFI_VARS_REG_PIO_BUFFER_TRANSFER, *Ptr);
+      if (Remaining >= sizeof (UINT32)) {
+        MmioWrite32 (mUefiVarsAddr + UEFI_VARS_REG_PIO_BUFFER_TRANSFER, *Ptr);
+      } else {
+        /* partial last word: zero-pad and send */
+        LastVal = 0;
+        CopyMem (&LastVal, Ptr, Remaining);
+        MmioWrite32 (mUefiVarsAddr + UEFI_VARS_REG_PIO_BUFFER_TRANSFER, LastVal);
+      }
     } else {
-      *Ptr = MmioRead32 (mUefiVarsAddr + UEFI_VARS_REG_PIO_BUFFER_TRANSFER);
+      UINT32  Val = MmioRead32 (mUefiVarsAddr + UEFI_VARS_REG_PIO_BUFFER_TRANSFER);
+      if (Remaining >= sizeof (UINT32)) {
+        *Ptr = Val;
+      } else {
+        /* partial last word: write only the valid bytes to avoid overflow */
+        CopyMem (Ptr, &Val, Remaining);
+        LastVal = Val;
+      }
     }
 
     Bytes += sizeof (*Ptr);
     Ptr++;
   }
 
-  Crc1 = CalculateCrc32c (Buffer, Bytes, 0);
+  /*
+   * QEMU computes CRC over pio_xfer_offset bytes (= Bytes, rounded up to
+   * 4-byte alignment).  When BufferSize is not 4-byte aligned, we must
+   * include the padding bytes from the last partial word in the CRC.
+   */
+  Crc1 = CalculateCrc32c (Buffer, BufferSize, 0);
+  if (Bytes > BufferSize) {
+    /* Chain CRC over the padding bytes from the last transferred word */
+    UINT8  *Pad    = (UINT8 *)&LastVal + (BufferSize & 3);
+    UINT32  PadLen = Bytes - BufferSize;
+    Crc1 = CalculateCrc32c (Pad, PadLen, Crc1);
+  }
+
   Crc2 = MmioRead32 (mUefiVarsAddr + UEFI_VARS_REG_PIO_BUFFER_CRC32C);
   if (Crc1 != Crc2) {
     DEBUG ((DEBUG_ERROR, "%a: crc32c mismatch (0x%08x,0x%08x)\n", __func__, Crc1, Crc2));

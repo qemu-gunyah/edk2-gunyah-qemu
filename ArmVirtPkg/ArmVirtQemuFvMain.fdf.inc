@@ -51,13 +51,13 @@ READ_LOCK_STATUS   = TRUE
   INF MdeModulePkg/Core/RuntimeDxe/RuntimeDxe.inf
   INF MdeModulePkg/Universal/SecurityStubDxe/SecurityStubDxe.inf
   INF MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf
+  INF OvmfPkg/EmuVariableFvbRuntimeDxe/Fvb.inf
   INF MdeModulePkg/Universal/FaultTolerantWriteDxe/FaultTolerantWriteDxe.inf
 !if $(QEMU_PV_VARS) == TRUE
   INF OvmfPkg/VirtMmCommunicationDxe/VirtMmCommunication.inf
   INF MdeModulePkg/Universal/Variable/RuntimeDxe/VariableSmmRuntimeDxe.inf
-!else
-  INF MdeModulePkg/Universal/Variable/RuntimeDxe/VariableRuntimeDxe.inf
 !endif
+  INF MdeModulePkg/Universal/Variable/RuntimeDxe/VariableRuntimeDxe.inf
 !if $(SECURE_BOOT_ENABLE) == TRUE
   INF SecurityPkg/VariableAuthenticated/SecureBootConfigDxe/SecureBootConfigDxe.inf
 !endif
@@ -143,15 +143,35 @@ READ_LOCK_STATUS   = TRUE
   # SMBIOS Support
   #
   INF MdeModulePkg/Universal/SmbiosDxe/SmbiosDxe.inf
-  INF OvmfPkg/SmbiosPlatformDxe/SmbiosPlatformDxe.inf
+  # OvmfPkg/SmbiosPlatformDxe removed — it reads fw_cfg SMBIOS tables from
+  # QEMU which report incorrect RAM size under Gunyah. Our ArmVirtPkg version
+  # reads the actual RAM size from HOBs.
+  # INF OvmfPkg/SmbiosPlatformDxe/SmbiosPlatformDxe.inf
 
   #
   # ACPI Support
   #
   INF OvmfPkg/PlatformHasAcpiDtDxe/PlatformHasAcpiDtDxe.inf
   INF MdeModulePkg/Universal/Acpi/AcpiTableDxe/AcpiTableDxe.inf
+  !include DynamicTablesPkg/DynamicTables.fdf.inc
+  INF ArmVirtPkg/KvmtoolCfgMgrDxe/ConfigurationManagerDxe.inf
+  INF ArmVirtPkg/GunyahRestrictedDmaPoolAcpiDxe/GunyahRestrictedDmaPoolAcpiDxe.inf
   INF MdeModulePkg/Universal/Acpi/BootGraphicsResourceTableDxe/BootGraphicsResourceTableDxe.inf
-  INF OvmfPkg/AcpiPlatformDxe/AcpiPlatformDxe.inf
+  #
+  # NOTE: OvmfPkg/AcpiPlatformDxe removed — it loads QEMU fw_cfg ACPI tables
+  # which describe devices Gunyah doesn't pass through (PL031, GPIO, etc).
+  # ACPI tables are instead generated from DTB by DynamicTablesPkg above.
+  #
+
+  #
+  # SMBIOS — static platform tables (ported from edk2-gunyah).
+  #
+  INF ArmVirtPkg/SmbiosPlatformDxe/SmbiosPlatformDxe.inf
+
+  #
+  # Gunyah: IoMmu for PCI DMA bounce buffers through SHARE'd memory
+  #
+  INF ArmVirtPkg/GunyahIoMmuDxe/GunyahIoMmuDxe.inf
 
   #
   # PCI support

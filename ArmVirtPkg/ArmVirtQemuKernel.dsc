@@ -49,6 +49,8 @@
 
 !include MdePkg/MdeLibs.dsc.inc
 
+!include DynamicTablesPkg/DynamicTables.dsc.inc
+
 # This comes at the end of includes to pick all relevant components without any
 # unintentional overrides.
 !include ArmVirtPkg/ArmVirt.dsc.inc
@@ -56,6 +58,20 @@
 [LibraryClasses.common]
   ArmLib|ArmPkg/Library/ArmLib/ArmBaseLib.inf
   ArmMmuLib|UefiCpuPkg/Library/ArmMmuLib/ArmMmuBaseLib.inf
+  PlatformFvbLib|OvmfPkg/Library/EmuVariableFvbLib/EmuVariableFvbLib.inf
+
+  #
+  # NS16550A serial @ 0x3F8 — match crosvm/edk2-gunyah exactly.
+  # Override PL011-based DebugLib/SerialPortLib from ArmVirt.dsc.inc.
+  #
+!if $(TARGET) != RELEASE
+  DebugLib|MdePkg/Library/BaseDebugLibSerialPort/BaseDebugLibSerialPort.inf
+!endif
+  SerialPortLib|ArmVirtPkg/Library/PatchedSerialPortLib16550/PatchedSerialPortLib16550.inf
+  # PatchedSerialPortLib16550 depends on PciLib but we use MMIO, not PCI UART.
+  # Provide a minimal PciLib that satisfies the dependency.
+  PciLib|MdePkg/Library/BasePciLibPciExpress/BasePciLibPciExpress.inf
+  PciExpressLib|MdePkg/Library/BasePciExpressLib/BasePciExpressLib.inf
 
   # Virtio Support
   VirtioLib|OvmfPkg/Library/VirtioLib/VirtioLib.inf
@@ -89,9 +105,39 @@
 
   ArmMonitorLib|ArmVirtPkg/Library/ArmVirtMonitorLib/ArmVirtMonitorLib.inf
 
+[LibraryClasses.common.SEC]
+  # Override PL011 serial with NS16550A for all SEC/PrePi phases
+  SerialPortLib|ArmVirtPkg/Library/PatchedSerialPortLib16550/PatchedSerialPortLib16550.inf
+  PciLib|MdePkg/Library/BasePciLibPciExpress/BasePciLibPciExpress.inf
+  PciExpressLib|MdePkg/Library/BasePciExpressLib/BasePciExpressLib.inf
+!if $(TARGET) != RELEASE
+  DebugLib|MdePkg/Library/BaseDebugLibSerialPort/BaseDebugLibSerialPort.inf
+!endif
+
+[LibraryClasses.common.PEI_CORE]
+  SerialPortLib|ArmVirtPkg/Library/PatchedSerialPortLib16550/PatchedSerialPortLib16550.inf
+!if $(TARGET) != RELEASE
+  DebugLib|MdePkg/Library/BaseDebugLibSerialPort/BaseDebugLibSerialPort.inf
+!endif
+
+[LibraryClasses.common.PEIM]
+  SerialPortLib|ArmVirtPkg/Library/PatchedSerialPortLib16550/PatchedSerialPortLib16550.inf
+!if $(TARGET) != RELEASE
+  DebugLib|MdePkg/Library/BaseDebugLibSerialPort/BaseDebugLibSerialPort.inf
+!endif
+
 [LibraryClasses.common.DXE_DRIVER]
   AcpiPlatformLib|OvmfPkg/Library/AcpiPlatformLib/DxeAcpiPlatformLib.inf
   ReportStatusCodeLib|MdeModulePkg/Library/DxeReportStatusCodeLib/DxeReportStatusCodeLib.inf
+
+[LibraryClasses.common.DXE_RUNTIME_DRIVER]
+  SerialPortLib|ArmVirtPkg/Library/PatchedSerialPortLib16550/PatchedSerialPortLib16550.inf
+!if $(TARGET) != RELEASE
+  DebugLib|MdePkg/Library/BaseDebugLibSerialPort/BaseDebugLibSerialPort.inf
+!endif
+
+[LibraryClasses.common.UEFI_APPLICATION]
+  PciPcdProducerLib|MdePkg/Library/BasePcdLibNull/BasePcdLibNull.inf
 
 [LibraryClasses.common.UEFI_DRIVER]
   UefiScsiLib|MdePkg/Library/UefiScsiLib/UefiScsiLib.inf
@@ -122,12 +168,13 @@
   gEfiMdeModulePkgTokenSpaceGuid.PcdTurnOffUsbLegacySupport|TRUE
 
 !if $(QEMU_PV_VARS) == TRUE
-  gUefiOvmfPkgTokenSpaceGuid.PcdQemuVarsRequire|TRUE
+  # Don't deadloop if uefi-vars-sysbus is absent — fall back to in-RAM vars
+  gUefiOvmfPkgTokenSpaceGuid.PcdQemuVarsRequire|FALSE
   gEfiMdeModulePkgTokenSpaceGuid.PcdEnableVariableRuntimeCache|FALSE
 !endif
 
 [PcdsFixedAtBuild.common]
-  gUefiOvmfPkgTokenSpaceGuid.PcdOvmfFdBaseAddress|0x00000000
+  gUefiOvmfPkgTokenSpaceGuid.PcdOvmfFdBaseAddress|0x80000000
   gUefiOvmfPkgTokenSpaceGuid.PcdOvmfFirmwareFdSize|$(FD_SIZE)
   gArmPlatformTokenSpaceGuid.PcdCPUCorePrimaryStackSize|0x4000
   gEfiMdeModulePkgTokenSpaceGuid.PcdMaxVariableSize|0x2000
@@ -145,10 +192,11 @@
   gArmPlatformTokenSpaceGuid.PcdSystemMemoryUefiRegionSize|0x04000000
 
   #
-  # ARM PrimeCell
+  # NS16550A UART @ 0x3F8 (matching crosvm/edk2-gunyah)
   #
-
-  ## PL011 - Serial Terminal
+  gEfiMdeModulePkgTokenSpaceGuid.PcdSerialRegisterBase|0x3f8
+  gEfiMdeModulePkgTokenSpaceGuid.PcdSerialUseMmio|TRUE
+  gEfiMdeModulePkgTokenSpaceGuid.PcdSerialPciDeviceInfo|{0xFF}
   gEfiMdePkgTokenSpaceGuid.PcdUartDefaultBaudRate|38400
 
   ## Default Terminal Type
@@ -188,9 +236,15 @@
   gEfiMdePkgTokenSpaceGuid.PcdReportStatusCodePropertyMask|3
   gEfiShellPkgTokenSpaceGuid.PcdShellFileOperationSize|0x20000
 
-  gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageVariableSize   | 0x40000
+  #
+  # NV storage: EmuVariableFvb requires (Variable + FtwWorking) <= FtwSpare.
+  # VarStore.fdf.inc defines 3 x 0x40000 blocks (total 0xC0000).
+  # Split: Variable=0x20000, FtwWorking=0x20000, FtwSpare=0x40000.
+  # This satisfies: (0x20000 + 0x20000) <= 0x40000.
+  #
+  gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageVariableSize   | 0x20000
   gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageFtwSpareSize   | 0x40000
-  gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageFtwWorkingSize | 0x40000
+  gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageFtwWorkingSize | 0x20000
 
 [PcdsPatchableInModule.common]
   # we need to provide a resolution for this PCD that supports PcdSet64()
@@ -215,6 +269,11 @@
   gArmTokenSpaceGuid.PcdFvBaseAddress|0x0
 
 [PcdsDynamicDefault.common]
+  # Force DTB mode so FDT is installed in EFI config table.
+  # Linux needs the DTB for restricted-dma-pool (Gunyah DMA isolation).
+  # ACPI tables are still generated by DynamicTablesPkg for Windows.
+  gUefiOvmfPkgTokenSpaceGuid.PcdForceNoAcpi|TRUE
+
   gEfiMdePkgTokenSpaceGuid.PcdPlatformBootTimeOut|3
 
   gEfiMdeModulePkgTokenSpaceGuid.PcdFlashNvStorageFtwSpareBase     | 0
@@ -307,18 +366,18 @@
   #
   ArmPkg/Drivers/CpuDxe/CpuDxe.inf
   MdeModulePkg/Core/RuntimeDxe/RuntimeDxe.inf
+  # Always include EmuVariableFvb for in-RAM variable storage.
+  # uefi-vars-sysbus is optional — without it, variables are volatile.
+  OvmfPkg/EmuVariableFvbRuntimeDxe/Fvb.inf
 !if $(QEMU_PV_VARS) == TRUE
   OvmfPkg/VirtMmCommunicationDxe/VirtMmCommunication.inf
   MdeModulePkg/Universal/Variable/RuntimeDxe/VariableSmmRuntimeDxe.inf
-!else
+!endif
   MdeModulePkg/Universal/Variable/RuntimeDxe/VariableRuntimeDxe.inf {
     <LibraryClasses>
       NULL|MdeModulePkg/Library/VarCheckUefiLib/VarCheckUefiLib.inf
-      NULL|EmbeddedPkg/Library/NvVarStoreFormattedLib/NvVarStoreFormattedLib.inf
-      # don't use unaligned CopyMem () on the UEFI varstore NOR flash region
       BaseMemoryLib|MdePkg/Library/BaseMemoryLib/BaseMemoryLib.inf
   }
-!endif
 !if $(SECURE_BOOT_ENABLE) == TRUE
   MdeModulePkg/Universal/SecurityStubDxe/SecurityStubDxe.inf {
     <LibraryClasses>
@@ -330,10 +389,7 @@
   MdeModulePkg/Universal/SecurityStubDxe/SecurityStubDxe.inf
 !endif
   MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf
-  MdeModulePkg/Universal/FaultTolerantWriteDxe/FaultTolerantWriteDxe.inf {
-    <LibraryClasses>
-      NULL|EmbeddedPkg/Library/NvVarStoreFormattedLib/NvVarStoreFormattedLib.inf
-  }
+  MdeModulePkg/Universal/FaultTolerantWriteDxe/FaultTolerantWriteDxe.inf
   MdeModulePkg/Universal/MonotonicCounterRuntimeDxe/MonotonicCounterRuntimeDxe.inf
   MdeModulePkg/Universal/ResetSystemRuntimeDxe/ResetSystemRuntimeDxe.inf
   EmbeddedPkg/RealTimeClockRuntimeDxe/RealTimeClockRuntimeDxe.inf {
@@ -479,6 +535,31 @@
   OvmfPkg/PlatformHasAcpiDtDxe/PlatformHasAcpiDtDxe.inf
 [Components.AARCH64]
   MdeModulePkg/Universal/Acpi/BootGraphicsResourceTableDxe/BootGraphicsResourceTableDxe.inf
+
+  # Override AcpiTableDxe: load unconditionally for Gunyah ACPI+DTB coexistence
+  MdeModulePkg/Universal/Acpi/AcpiTableDxe/AcpiTableDxe.inf
+
+  # SMBIOS platform tables
+  ArmVirtPkg/SmbiosPlatformDxe/SmbiosPlatformDxe.inf
+
+  # DynamicTablesPkg: generate ACPI from DTB
+  ArmVirtPkg/KvmtoolCfgMgrDxe/ConfigurationManagerDxe.inf {
+    <LibraryClasses>
+      HwInfoParserLib|DynamicTablesPkg/Library/FdtHwInfoParserLib/FdtHwInfoParserLib.inf
+      DynamicPlatRepoLib|DynamicTablesPkg/Library/Common/DynamicPlatRepoLib/DynamicPlatRepoLib.inf
+    <Depex>
+      TRUE
+  }
+
+  # Gunyah IOMMU DMA bounce buffer driver
+  ArmVirtPkg/GunyahIoMmuDxe/GunyahIoMmuDxe.inf {
+    <Depex>
+      TRUE
+  }
+
+  # Gunyah restricted DMA pool ACPI SSDT
+  ArmVirtPkg/GunyahRestrictedDmaPoolAcpiDxe/GunyahRestrictedDmaPoolAcpiDxe.inf
+
   OvmfPkg/AcpiPlatformDxe/AcpiPlatformDxe.inf {
     <LibraryClasses>
       NULL|OvmfPkg/Fdt/FdtPciPcdProducerLib/FdtPciPcdProducerLib.inf
